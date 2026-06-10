@@ -9,16 +9,25 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
       }
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
       }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
+      }
     }
   },
   "submit": {
