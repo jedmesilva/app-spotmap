@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Fog of War",
+    "slug": "fog-map",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "fog-map",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0d1117"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Fog of War usa sua localização para revelar o mapa enquanto você explora.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Fog of War usa sua localização para revelar o mapa enquanto você explora."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://replit.com/"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Fog of War usa sua localização para revelar o mapa enquanto você explora.",
+          "locationAlwaysAndWhenInUsePermission": "Fog of War usa sua localização para revelar o mapa enquanto você explora."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

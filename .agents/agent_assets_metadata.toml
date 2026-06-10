@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "fiMDF5ZnIaDqTZj6DUhoi"
+uri = "file://artifacts/fog-map/assets/images/icon.png"
+type = "image"
+title = "fog map icon"
