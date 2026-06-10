@@ -11,7 +11,8 @@
         "buildType": "apk"
       },
       "env": {
-        "COREPACK_ENABLE_STRICT": "0"
+        "COREPACK_ENABLE_STRICT": "0",
+        "NODE_VERSION": "20"
       }
     },
     "preview": {
@@ -20,13 +21,15 @@
         "buildType": "apk"
       },
       "env": {
-        "COREPACK_ENABLE_STRICT": "0"
+        "COREPACK_ENABLE_STRICT": "0",
+        "NODE_VERSION": "20"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "COREPACK_ENABLE_STRICT": "0"
+        "COREPACK_ENABLE_STRICT": "0",
+        "NODE_VERSION": "20"
       }
     }
   },
