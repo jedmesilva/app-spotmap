@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "Fog of War Map"
+version = "1.0.0"
+id = "artifacts/fog-map"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 22290
+
+[services.development]
+run = "pnpm --filter @workspace/fog-map run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/fog-map", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/fog-map", "run", "serve" ]
+
+[services.env]
+PORT = "22290"
+BASE_PATH = "/"

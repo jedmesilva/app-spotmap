@@ -1,0 +1,36 @@
+{
+  "cli": {
+    "version": ">= 10.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "COREPACK_ENABLE_STRICT": "0"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
