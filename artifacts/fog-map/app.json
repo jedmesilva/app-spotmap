@@ -15,12 +15,14 @@
     },
     "ios": {
       "supportsTablet": false,
+      "bundleIdentifier": "app.spotmap.fogmap",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Fog of War usa sua localização para revelar o mapa enquanto você explora.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Fog of War usa sua localização para revelar o mapa enquanto você explora."
       }
     },
     "android": {
+      "package": "app.spotmap.fogmap",
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
@@ -44,7 +46,8 @@
           "locationWhenInUsePermission": "Fog of War usa sua localização para revelar o mapa enquanto você explora.",
           "locationAlwaysAndWhenInUsePermission": "Fog of War usa sua localização para revelar o mapa enquanto você explora."
         }
-      ]
+      ],
+      "@maplibre/maplibre-react-native"
     ],
     "experiments": {
       "typedRoutes": true,
