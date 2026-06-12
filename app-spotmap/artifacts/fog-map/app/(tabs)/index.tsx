@@ -5,6 +5,7 @@ import * as Location from "expo-location";
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -15,8 +16,10 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from "react-native";
+import Svg, { Circle, Defs, Mask, Rect } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import colors from "@/constants/colors";
 
@@ -31,6 +34,13 @@ type LngLat = [number, number];
 interface RevealedPoint {
   lng: number;
   lat: number;
+}
+
+interface CameraState {
+  lng: number;
+  lat: number;
+  zoom: number;
+  heading: number;
 }
 
 function haversine(
@@ -50,53 +60,14 @@ function haversine(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// CW winding = interior ring (hole) in GeoJSON RFC 7946
-function makeCircleHole(
-  lng: number,
-  lat: number,
-  radiusMeters: number,
-  numPoints = 32
-): LngLat[] {
-  const latRadius = radiusMeters / 111320;
-  const lngRadius =
-    radiusMeters / (111320 * Math.cos((lat * Math.PI) / 180));
-  const coords: LngLat[] = [];
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = -(i * 2 * Math.PI) / numPoints;
-    coords.push([
-      lng + lngRadius * Math.cos(angle),
-      lat + latRadius * Math.sin(angle),
-    ]);
-  }
-  return coords;
+// Mercator projection helpers (normalized 0–1 space, then scaled by 256 * 2^zoom)
+function mercatorX(lng: number): number {
+  return (lng + 180) / 360;
 }
 
-// CCW = exterior ring
-const WORLD_RING: LngLat[] = [
-  [-180, -85.051129],
-  [-180, 85.051129],
-  [180, 85.051129],
-  [180, -85.051129],
-  [-180, -85.051129],
-];
-
-function buildFogGeoJSON(points: RevealedPoint[]) {
-  const holes = points.map((p) =>
-    makeCircleHole(p.lng, p.lat, REVEAL_RADIUS_METERS)
-  );
-  return {
-    type: "FeatureCollection" as const,
-    features: [
-      {
-        type: "Feature" as const,
-        properties: {},
-        geometry: {
-          type: "Polygon" as const,
-          coordinates: [WORLD_RING, ...holes],
-        },
-      },
-    ],
-  };
+function mercatorY(lat: number): number {
+  const rad = (lat * Math.PI) / 180;
+  return (1 - Math.log(Math.tan(Math.PI / 4 + rad / 2)) / Math.PI) / 2;
 }
 
 function buildUserGeoJSON(coord: LngLat) {
@@ -140,6 +111,8 @@ if (!isWeb) {
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
+  const { width: screenW, height: screenH } = useWindowDimensions();
+
   const [permStatus, setPermStatus] = useState<
     "loading" | "denied" | "granted"
   >("loading");
@@ -147,6 +120,13 @@ export default function MapScreen() {
   const [revealedPoints, setRevealedPoints] = useState<RevealedPoint[]>([]);
   const [totalDistance, setTotalDistance] = useState(0);
   const [isTracking, setIsTracking] = useState(true);
+  const [cameraState, setCameraState] = useState<CameraState>({
+    lng: 0,
+    lat: 0,
+    zoom: 15,
+    heading: 0,
+  });
+
   const lastPointRef = useRef<RevealedPoint | null>(null);
   const lastPosRef = useRef<{ lat: number; lng: number } | null>(null);
   const subscriptionRef = useRef<Location.LocationSubscription | null>(null);
@@ -245,6 +225,73 @@ export default function MapScreen() {
     else stopTracking();
   }, [isTracking]);
 
+  const handleRegionChange = useCallback((e: any) => {
+    if (!e?.geometry?.coordinates) return;
+    const [lng, lat] = e.geometry.coordinates;
+    const zoom = e.properties?.zoomLevel ?? 15;
+    const heading = e.properties?.heading ?? 0;
+    setCameraState({ lng, lat, zoom, heading });
+  }, []);
+
+  // Compute fog circles in screen space using Mercator projection
+  const fogCircles = useMemo(() => {
+    if (revealedPoints.length === 0) return [];
+
+    const { lng: cLng, lat: cLat, zoom, heading } = cameraState;
+    const scale = Math.pow(2, zoom) * 256;
+
+    const cx = mercatorX(cLng) * scale;
+    const cy = mercatorY(cLat) * scale;
+
+    // Radius in pixels: metersPerPixel = earthCircumference * cos(lat) / scale
+    const metersPerPixel =
+      (2 * Math.PI * 6378137 * Math.cos((cLat * Math.PI) / 180)) / scale;
+    const r = REVEAL_RADIUS_METERS / metersPerPixel;
+
+    // Bearing rotation matrix (clockwise bearing → rotate coords)
+    const bearingRad = (heading * Math.PI) / 180;
+    const cosB = Math.cos(bearingRad);
+    const sinB = Math.sin(bearingRad);
+
+    // Dedup: snap to ~25m grid to reduce number of SVG elements
+    const gridSize = REVEAL_RADIUS_METERS / 2;
+    const gridDegLat = gridSize / 111320;
+    const gridDegLng = gridSize / (111320 * Math.cos((cLat * Math.PI) / 180));
+    const seen = new Set<string>();
+
+    const margin = r;
+
+    const circles: { x: number; y: number; r: number }[] = [];
+    for (const p of revealedPoints) {
+      const gx = Math.round(p.lng / gridDegLng);
+      const gy = Math.round(p.lat / gridDegLat);
+      const key = `${gx},${gy}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const px = mercatorX(p.lng) * scale;
+      const py = mercatorY(p.lat) * scale;
+
+      const dx = px - cx;
+      const dy = py - cy;
+
+      // Apply bearing rotation
+      const rx = dx * cosB + dy * sinB;
+      const ry = -dx * sinB + dy * cosB;
+
+      const sx = screenW / 2 + rx;
+      const sy = screenH / 2 + ry;
+
+      // Viewport culling
+      if (sx + r < -margin || sx - r > screenW + margin) continue;
+      if (sy + r < -margin || sy - r > screenH + margin) continue;
+
+      circles.push({ x: sx, y: sy, r });
+    }
+
+    return circles;
+  }, [revealedPoints, cameraState, screenW, screenH]);
+
   const handleReset = useCallback(() => {
     Alert.alert(
       "Apagar progresso",
@@ -324,7 +371,6 @@ export default function MapScreen() {
   }
 
   const { Map, Camera, GeoJSONSource, Layer } = ML;
-  const fogData = buildFogGeoJSON(revealedPoints);
   const userData = userLocation ? buildUserGeoJSON(userLocation) : null;
 
   const topOffset = insets.top + 12;
@@ -338,18 +384,10 @@ export default function MapScreen() {
         logo={false}
         attribution={false}
         compass
+        onRegionIsChanging={handleRegionChange}
+        onRegionDidChange={handleRegionChange}
       >
         <Camera ref={cameraRef} />
-
-        {/* Fog overlay */}
-        <GeoJSONSource id="fog-source" data={fogData}>
-          <Layer
-            id="fog-fill"
-            type="fill"
-            source="fog-source"
-            style={{ fillColor: FOG_FILL_COLOR, fillOpacity: 1 }}
-          />
-        </GeoJSONSource>
 
         {/* User location */}
         {userData && (
@@ -378,6 +416,28 @@ export default function MapScreen() {
           </GeoJSONSource>
         )}
       </Map>
+
+      {/* SVG fog overlay — mask approach avoids winding rule artifacts */}
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg width={screenW} height={screenH}>
+          <Defs>
+            <Mask id="fog-mask">
+              <Rect x="0" y="0" width={screenW} height={screenH} fill="white" />
+              {fogCircles.map((c, i) => (
+                <Circle key={i} cx={c.x} cy={c.y} r={c.r} fill="black" />
+              ))}
+            </Mask>
+          </Defs>
+          <Rect
+            x="0"
+            y="0"
+            width={screenW}
+            height={screenH}
+            fill={FOG_FILL_COLOR}
+            mask="url(#fog-mask)"
+          />
+        </Svg>
+      </View>
 
       {/* Top HUD */}
       <View style={[styles.topHud, { top: topOffset }]}>
