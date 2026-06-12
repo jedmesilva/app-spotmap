@@ -25,18 +25,11 @@ import colors from "@/constants/colors";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const FOG_COLOR = "rgba(13, 17, 27, 0.92)";
-
-// ~1m grid cells for meter-by-meter revelation
-const CELL_SIZE_DEG = 0.000009;
+const CELL_SIZE_DEG = 0.000009; // ~1m grid cells
 const REVEAL_RADIUS_METERS = 6;
 const MAX_CELLS = 15000;
 const CELLS_KEY = "@fog_cells_v3";
 const USER_ID_KEY = "@user_id";
-
-// Collectible collection radius in meters
-const COLLECT_RADIUS_METERS = 10;
-
-// Send GPS to server at most every 3 seconds
 const WS_POSITION_INTERVAL_MS = 3000;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -56,13 +49,6 @@ interface CellRecord {
   lng: number;
 }
 
-interface Collectible {
-  id: string;
-  lat: number;
-  lng: number;
-  type: "common" | "rare";
-}
-
 interface OtherPlayer {
   userId: string;
   lat: number;
@@ -77,16 +63,6 @@ function getCellRecord(lat: number, lng: number): CellRecord {
   return { id: `${cLat.toFixed(7)}_${cLng.toFixed(7)}`, lat: cLat, lng: cLng };
 }
 
-function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371000;
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
-  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
 function mercatorX(lng: number) { return (lng + 180) / 360; }
 function mercatorY(lat: number) {
   const r = (lat * Math.PI) / 180;
@@ -98,10 +74,14 @@ function makeGeoJSON(features: object[]) {
 }
 
 function pointFeature(lng: number, lat: number, props: object = {}) {
-  return { type: "Feature" as const, properties: props, geometry: { type: "Point" as const, coordinates: [lng, lat] } };
+  return {
+    type: "Feature" as const,
+    properties: props,
+    geometry: { type: "Point" as const, coordinates: [lng, lat] },
+  };
 }
 
-// ─── Map bootstrap ────────────────────────────────────────────────────────────
+// ─── Map setup ────────────────────────────────────────────────────────────────
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 const isWeb = (Platform.OS as string) === "web";
@@ -117,44 +97,30 @@ export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const { width: screenW, height: screenH } = useWindowDimensions();
 
-  // ── Auth / identity ─────────────────────────────────────────────────────────
-  const [userId, setUserId] = useState<string | null>(null);
+  // ── User identity ────────────────────────────────────────────────────────────
   const userIdRef = useRef<string | null>(null);
 
-  // ── GPS ─────────────────────────────────────────────────────────────────────
+  // ── GPS ──────────────────────────────────────────────────────────────────────
   const [permStatus, setPermStatus] = useState<"loading" | "denied" | "granted">("loading");
   const [userLocation, setUserLocation] = useState<LngLat | null>(null);
   const userLocationRef = useRef<LngLat | null>(null);
   const subRef = useRef<Location.LocationSubscription | null>(null);
   const cameraRef = useRef<import("@maplibre/maplibre-react-native").CameraRef | null>(null);
-  const initialCentered = useRef(false);
 
-  // ── Fog cells ───────────────────────────────────────────────────────────────
+  // ── Fog cells ────────────────────────────────────────────────────────────────
   const [cells, setCells] = useState<CellRecord[]>([]);
   const cellSetRef = useRef<Set<string>>(new Set());
 
-  // ── Multiplayer ─────────────────────────────────────────────────────────────
+  // ── Camera state (for fog projection) ───────────────────────────────────────
+  const [cameraState, setCameraState] = useState<CameraState>({ lng: 0, lat: 0, zoom: 17, heading: 0 });
+
+  // ── Multiplayer ──────────────────────────────────────────────────────────────
   const [otherPlayers, setOtherPlayers] = useState<OtherPlayer[]>([]);
 
-  // ── Collectibles ────────────────────────────────────────────────────────────
-  const [collectibles, setCollectibles] = useState<Collectible[]>([]);
-  const collectiblesRef = useRef<Collectible[]>([]);
-  const [collectedIds, setCollectedIds] = useState<Set<string>>(new Set());
-  const collectedIdsRef = useRef<Set<string>>(new Set());
-
-  // ── Camera ──────────────────────────────────────────────────────────────────
-  const [cameraState, setCameraState] = useState<CameraState>({ lng: 0, lat: 0, zoom: 15, heading: 0 });
-
-  // ── WebSocket ───────────────────────────────────────────────────────────────
+  // ── WebSocket ────────────────────────────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
   const wsReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWsSendRef = useRef<number>(0);
-
-  // Sync collectibles/collected to refs so addPoint closure is always fresh
-  useEffect(() => { collectiblesRef.current = collectibles; }, [collectibles]);
-  useEffect(() => { collectedIdsRef.current = collectedIds; }, [collectedIds]);
-
-  // ── WebSocket connection ─────────────────────────────────────────────────────
 
   const connectWS = useCallback((uid: string) => {
     const domain = process.env.EXPO_PUBLIC_DOMAIN;
@@ -180,18 +146,14 @@ export default function MapScreen() {
 
       if (msg.type === "init") {
         setOtherPlayers((msg.players as OtherPlayer[]).filter((p) => p.userId !== uid));
-        setCollectibles(msg.collectibles as Collectible[]);
-      }
-      if (msg.type === "collectibles") {
-        setCollectibles(msg.collectibles as Collectible[]);
       }
       if (msg.type === "players") {
         setOtherPlayers((msg.players as OtherPlayer[]).filter((p) => p.userId !== uid));
       }
       if (msg.type === "player_moved") {
         setOtherPlayers((prev) => {
-          const idx = prev.findIndex((p) => p.userId === msg.userId);
           const updated = { userId: msg.userId, lat: msg.lat, lng: msg.lng };
+          const idx = prev.findIndex((p) => p.userId === msg.userId);
           if (idx === -1) return [...prev, updated];
           const next = [...prev];
           next[idx] = updated;
@@ -201,9 +163,6 @@ export default function MapScreen() {
       if (msg.type === "player_left") {
         setOtherPlayers((prev) => prev.filter((p) => p.userId !== msg.userId));
       }
-      if (msg.type === "item_collected") {
-        setCollectedIds((prev) => new Set([...prev, msg.itemId as string]));
-      }
     };
 
     ws.onclose = () => {
@@ -211,14 +170,12 @@ export default function MapScreen() {
     };
   }, []);
 
-  // ── userId init ─────────────────────────────────────────────────────────────
-
+  // ── Init: userId + WebSocket ─────────────────────────────────────────────────
   useEffect(() => {
     AsyncStorage.getItem(USER_ID_KEY).then((stored) => {
       const uid = stored ?? `u_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
       if (!stored) AsyncStorage.setItem(USER_ID_KEY, uid);
       userIdRef.current = uid;
-      setUserId(uid);
       connectWS(uid);
     });
     return () => {
@@ -227,8 +184,7 @@ export default function MapScreen() {
     };
   }, [connectWS]);
 
-  // ── Fog persistence ─────────────────────────────────────────────────────────
-
+  // ── Fog persistence ───────────────────────────────────────────────────────────
   useEffect(() => {
     AsyncStorage.getItem(CELLS_KEY).then((raw) => {
       if (!raw) return;
@@ -246,10 +202,9 @@ export default function MapScreen() {
     }
   }, [cells]);
 
-  // ── Core GPS handler ─────────────────────────────────────────────────────────
-
+  // ── Core: reveal fog + broadcast position ─────────────────────────────────────
   const addPoint = useCallback((lat: number, lng: number) => {
-    // Reveal fog cell
+    // Reveal new cell
     const cell = getCellRecord(lat, lng);
     if (!cellSetRef.current.has(cell.id)) {
       cellSetRef.current.add(cell.id);
@@ -262,22 +217,7 @@ export default function MapScreen() {
       });
     }
 
-    // Auto-collect nearby items
-    const nearby = collectiblesRef.current.filter(
-      (c) => !collectedIdsRef.current.has(c.id) && haversine(lat, lng, c.lat, c.lng) < COLLECT_RADIUS_METERS
-    );
-    if (nearby.length > 0) {
-      for (const item of nearby) {
-        collectedIdsRef.current.add(item.id);
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: "collect", userId: userIdRef.current, itemId: item.id }));
-        }
-      }
-      setCollectedIds(new Set(collectedIdsRef.current));
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-
-    // Throttled position broadcast
+    // Throttled WS position broadcast
     const now = Date.now();
     if (wsRef.current?.readyState === WebSocket.OPEN && now - lastWsSendRef.current > WS_POSITION_INTERVAL_MS) {
       wsRef.current.send(JSON.stringify({ type: "position", userId: userIdRef.current, lat, lng }));
@@ -285,50 +225,51 @@ export default function MapScreen() {
     }
   }, []);
 
-  // ── GPS tracking ────────────────────────────────────────────────────────────
-
+  // ── GPS tracking ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (isWeb) { setPermStatus("granted"); return; }
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") { setPermStatus("denied"); return; }
       setPermStatus("granted");
+
       subRef.current = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 1, timeInterval: 500 },
         ({ coords }) => {
-          const { latitude: lat, longitude: lng } = coords;
-          const loc: LngLat = [lng, lat];
+          const loc: LngLat = [coords.longitude, coords.latitude];
           userLocationRef.current = loc;
           setUserLocation(loc);
-          addPoint(lat, lng);
-          if (!initialCentered.current && cameraRef.current) {
-            initialCentered.current = true;
-            cameraRef.current.flyTo({ center: loc, zoom: 17, duration: 800 });
-          }
+          addPoint(coords.latitude, coords.longitude);
+
+          // Keep camera following the user
+          cameraRef.current?.flyTo({ center: loc, zoom: 17, duration: 300 });
         }
       );
     })();
     return () => subRef.current?.remove();
   }, [addPoint]);
 
-  // ── Camera sync ──────────────────────────────────────────────────────────────
-
+  // ── Camera region change (for fog projection) ────────────────────────────────
   const handleRegionChange = useCallback((e: any) => {
     if (!e?.geometry?.coordinates) return;
     const [lng, lat] = e.geometry.coordinates;
-    setCameraState({ lng, lat, zoom: e.properties?.zoomLevel ?? 15, heading: e.properties?.heading ?? 0 });
+    setCameraState({
+      lng,
+      lat,
+      zoom: e.properties?.zoomLevel ?? 17,
+      heading: e.properties?.heading ?? 0,
+    });
   }, []);
 
-  // ── Center on user ───────────────────────────────────────────────────────────
-
+  // ── Center button ─────────────────────────────────────────────────────────────
   const handleCenter = useCallback(() => {
-    if (!userLocationRef.current || !cameraRef.current) return;
-    cameraRef.current.flyTo({ center: userLocationRef.current, zoom: 17, duration: 500 });
+    const loc = userLocationRef.current;
+    if (!loc || !cameraRef.current) return;
+    cameraRef.current.flyTo({ center: loc, zoom: 17, duration: 500 });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }, []);
 
-  // ── Fog circles (screen space) ───────────────────────────────────────────────
-
+  // ── Fog circles (screen-space projection) ─────────────────────────────────────
   const fogCircles = useMemo(() => {
     if (cells.length === 0) return [];
     const { lng: cLng, lat: cLat, zoom, heading } = cameraState;
@@ -342,6 +283,7 @@ export default function MapScreen() {
     const sinB = Math.sin(bearingRad);
     const margin = r * 2;
     const result: { x: number; y: number; r: number }[] = [];
+
     for (const cell of cells) {
       const px = mercatorX(cell.lng) * scale;
       const py = mercatorY(cell.lat) * scale;
@@ -356,8 +298,7 @@ export default function MapScreen() {
     return result;
   }, [cells, cameraState, screenW, screenH]);
 
-  // ── GeoJSON for map layers ───────────────────────────────────────────────────
-
+  // ── GeoJSON ──────────────────────────────────────────────────────────────────
   const userGeoJSON = useMemo(
     () => userLocation ? makeGeoJSON([pointFeature(userLocation[0], userLocation[1])]) : makeGeoJSON([]),
     [userLocation]
@@ -368,16 +309,7 @@ export default function MapScreen() {
     [otherPlayers]
   );
 
-  const collectiblesGeoJSON = useMemo(
-    () => makeGeoJSON(
-      collectibles
-        .filter((c) => !collectedIds.has(c.id))
-        .map((c) => pointFeature(c.lng, c.lat, { id: c.id, type: c.type }))
-    ),
-    [collectibles, collectedIds]
-  );
-
-  // ── Render: permission states ────────────────────────────────────────────────
+  // ── Permission states ─────────────────────────────────────────────────────────
 
   if (permStatus === "loading") {
     return <View style={styles.center}><ActivityIndicator size="large" color={colors.light.primary} /></View>;
@@ -388,7 +320,9 @@ export default function MapScreen() {
       <View style={[styles.center, { paddingHorizontal: 32 }]}>
         <Feather name="map-pin" size={40} color={colors.light.primary} style={{ marginBottom: 20 }} />
         <Text style={styles.titleText}>Localização necessária</Text>
-        <Text style={styles.bodyText}>Este app precisa da sua localização para revelar o mapa enquanto você explora.</Text>
+        <Text style={styles.bodyText}>
+          Este app precisa da sua localização para revelar o mapa enquanto você explora.
+        </Text>
         <TouchableOpacity
           style={styles.btn}
           onPress={async () => {
@@ -412,51 +346,40 @@ export default function MapScreen() {
     );
   }
 
-  // ── Render: map ──────────────────────────────────────────────────────────────
+  // ── Map ───────────────────────────────────────────────────────────────────────
 
   const { Map, Camera, GeoJSONSource, Layer } = ML;
 
   return (
     <View style={styles.container}>
 
-      {/* ── Map ── */}
+      {/* Map */}
       <Map
         style={styles.map}
         mapStyle={MAP_STYLE}
         logo={false}
         attribution={false}
-        compass
         onRegionIsChanging={handleRegionChange}
         onRegionDidChange={handleRegionChange}
       >
         <Camera ref={cameraRef} />
 
-        {/* Current user */}
+        {/* Current user dot */}
         <GeoJSONSource id="user-src" data={userGeoJSON}>
           <Layer id="user-pulse" type="circle" source="user-src"
-            style={{ circleRadius: 18, circleColor: "rgba(34,211,238,0.18)", circleStrokeWidth: 0 }} />
+            style={{ circleRadius: 20, circleColor: "rgba(34,211,238,0.15)", circleStrokeWidth: 0 }} />
           <Layer id="user-dot" type="circle" source="user-src"
-            style={{ circleRadius: 7, circleColor: colors.light.primary, circleStrokeWidth: 2.5, circleStrokeColor: "#fff" }} />
+            style={{ circleRadius: 7, circleColor: colors.light.primary, circleStrokeWidth: 2.5, circleStrokeColor: "#ffffff" }} />
         </GeoJSONSource>
 
         {/* Other players */}
         <GeoJSONSource id="players-src" data={playersGeoJSON}>
           <Layer id="players-dot" type="circle" source="players-src"
-            style={{ circleRadius: 6, circleColor: "#a78bfa", circleStrokeWidth: 2, circleStrokeColor: "#fff" }} />
-        </GeoJSONSource>
-
-        {/* Collectibles */}
-        <GeoJSONSource id="items-src" data={collectiblesGeoJSON}>
-          <Layer id="items-rare" type="circle" source="items-src"
-            filter={["==", ["get", "type"], "rare"]}
-            style={{ circleRadius: 8, circleColor: "#f97316", circleStrokeWidth: 2, circleStrokeColor: "#fff" }} />
-          <Layer id="items-common" type="circle" source="items-src"
-            filter={["==", ["get", "type"], "common"]}
-            style={{ circleRadius: 6, circleColor: "#facc15", circleStrokeWidth: 1.5, circleStrokeColor: "#fff" }} />
+            style={{ circleRadius: 6, circleColor: "#a78bfa", circleStrokeWidth: 2, circleStrokeColor: "#ffffff" }} />
         </GeoJSONSource>
       </Map>
 
-      {/* ── Fog SVG overlay ── */}
+      {/* Fog SVG overlay */}
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
         <Svg width={screenW} height={screenH}>
           <Defs>
@@ -476,7 +399,7 @@ export default function MapScreen() {
         </Svg>
       </View>
 
-      {/* ── Center FAB ── */}
+      {/* Center FAB — único botão */}
       <TouchableOpacity
         style={[styles.fab, { bottom: insets.bottom + 20, right: 16 }]}
         onPress={handleCenter}
