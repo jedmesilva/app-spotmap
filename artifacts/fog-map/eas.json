@@ -9,7 +9,7 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk",
-        "image": "ubuntu-22.04-jdk-17-ndk-r27"
+        "image": "ubuntu-24.04-jdk-17-ndk-r27b"
       },
       "env": {
         "COREPACK_ENABLE_STRICT": "0",
@@ -20,7 +20,7 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk",
-        "image": "ubuntu-22.04-jdk-17-ndk-r27"
+        "image": "ubuntu-24.04-jdk-17-ndk-r27b"
       },
       "env": {
         "COREPACK_ENABLE_STRICT": "0",
@@ -30,7 +30,7 @@
     "production": {
       "autoIncrement": true,
       "android": {
-        "image": "ubuntu-22.04-jdk-17-ndk-r27"
+        "image": "ubuntu-24.04-jdk-17-ndk-r27b"
       },
       "env": {
         "COREPACK_ENABLE_STRICT": "0",
