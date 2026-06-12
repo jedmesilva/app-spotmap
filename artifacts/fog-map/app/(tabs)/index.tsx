@@ -28,16 +28,17 @@ import colors from "@/constants/colors";
 const FOG_FILL_COLOR = "rgba(13, 17, 27, 0.90)";
 
 // Grid cell size in degrees.
-// ~0.00025° ≈ 22m at equator — fine-grained point-by-point revelation.
-const CELL_SIZE_DEG = 0.00025;
+// ~0.000009° ≈ 1m at equator — each meter the user walks gets its own cell.
+const CELL_SIZE_DEG = 0.000009;
 
 // Visual reveal radius around each revealed cell center (meters).
-const REVEAL_RADIUS_METERS = 40;
+// Small radius = tight trail, exactly where the user walked.
+const REVEAL_RADIUS_METERS = 6;
 
-// Sliding window cap.
-const MAX_CELLS = 6000;
+// Sliding window cap — with 1m cells, 15000 cells ≈ 15km of trail.
+const MAX_CELLS = 15000;
 
-const STORAGE_KEY = "@fog_map_cells_v2";
+const STORAGE_KEY = "@fog_map_cells_v3";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -200,7 +201,7 @@ export default function MapScreen() {
     subscriptionRef.current = null;
     try {
       const sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5, timeInterval: 1000 },
+        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 1, timeInterval: 500 },
         (loc) => {
           const { latitude: lat, longitude: lng } = loc.coords;
           setUserLocation([lng, lat]);
@@ -234,6 +235,7 @@ export default function MapScreen() {
   }, []);
 
   useEffect(() => {
+    if (isWeb) return;
     if (permStatus !== "granted") return;
     if (isTracking) startTracking(); else stopTracking();
   }, [isTracking]);
@@ -434,8 +436,7 @@ export default function MapScreen() {
               gradientUnits="objectBoundingBox"
             >
               <Stop offset="0%"   stopColor="black" stopOpacity="1" />
-              <Stop offset="65%"  stopColor="black" stopOpacity="0.98" />
-              <Stop offset="85%"  stopColor="black" stopOpacity="0.5" />
+              <Stop offset="80%"  stopColor="black" stopOpacity="1" />
               <Stop offset="100%" stopColor="black" stopOpacity="0" />
             </RadialGradient>
 
