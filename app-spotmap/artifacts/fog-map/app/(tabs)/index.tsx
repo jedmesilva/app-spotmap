@@ -2,7 +2,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
-import { latLngToCell, cellToLatLng } from "h3-js";
 import React, {
   useCallback,
   useEffect,
@@ -28,17 +27,17 @@ import colors from "@/constants/colors";
 
 const FOG_FILL_COLOR = "rgba(13, 17, 27, 0.90)";
 
-// H3 resolution 11 → cells ~25m edge length.
-// Each unique GPS point in a new area gets its own cell.
-const H3_RESOLUTION = 11;
+// Grid cell size in degrees.
+// ~0.00025° ≈ 22m at equator — fine-grained point-by-point revelation.
+const CELL_SIZE_DEG = 0.00025;
 
-// Visual reveal radius around each H3 cell center (pixels mapped from meters).
+// Visual reveal radius around each revealed cell center (meters).
 const REVEAL_RADIUS_METERS = 40;
 
-// Max stored cells (sliding window).
+// Sliding window cap.
 const MAX_CELLS = 6000;
 
-const STORAGE_KEY = "@fog_map_cells_v1";
+const STORAGE_KEY = "@fog_map_cells_v2";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,7 +50,26 @@ interface CameraState {
   heading: number;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+interface CellRecord {
+  id: string;
+  lat: number;
+  lng: number;
+}
+
+// ─── Grid helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Snap a GPS coordinate to the nearest cell center.
+ * Returns a stable string ID and the center lat/lng of that cell.
+ */
+function getCellRecord(lat: number, lng: number): CellRecord {
+  const cellLat = Math.round(lat / CELL_SIZE_DEG) * CELL_SIZE_DEG;
+  const cellLng = Math.round(lng / CELL_SIZE_DEG) * CELL_SIZE_DEG;
+  const id = `${cellLat.toFixed(7)}_${cellLng.toFixed(7)}`;
+  return { id, lat: cellLat, lng: cellLng };
+}
+
+// ─── Geo helpers ──────────────────────────────────────────────────────────────
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000;
@@ -63,7 +81,6 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Mercator projection (normalized 0–1 space)
 function mercatorX(lng: number): number {
   return (lng + 180) / 360;
 }
@@ -89,13 +106,12 @@ function formatDistance(meters: number): string {
 }
 
 function formatArea(numCells: number): string {
-  // Approximate: each cell contributes a circle of REVEAL_RADIUS_METERS
   const areaM2 = numCells * Math.PI * REVEAL_RADIUS_METERS ** 2;
   if (areaM2 < 10000) return `${Math.round(areaM2)} m²`;
   return `${(areaM2 / 1_000_000).toFixed(4)} km²`;
 }
 
-// ─── Map config ──────────────────────────────────────────────────────────────
+// ─── Map config ───────────────────────────────────────────────────────────────
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 const isWeb = (Platform.OS as string) === "web";
@@ -118,9 +134,9 @@ export default function MapScreen() {
   const [permStatus, setPermStatus] = useState<"loading" | "denied" | "granted">("loading");
   const [userLocation, setUserLocation] = useState<LngLat | null>(null);
 
-  // H3 cell IDs ordered by insertion time (for sliding window)
-  const [cellIds, setCellIds] = useState<string[]>([]);
-  // O(1) dedup lookup — kept in sync with cellIds
+  // Ordered list of revealed cells (for sliding window + rendering)
+  const [cells, setCells] = useState<CellRecord[]>([]);
+  // Fast dedup lookup — kept in sync with cells array
   const cellSetRef = useRef<Set<string>>(new Set());
 
   const [totalDistance, setTotalDistance] = useState(0);
@@ -138,43 +154,42 @@ export default function MapScreen() {
     AsyncStorage.getItem(STORAGE_KEY).then((raw) => {
       if (!raw) return;
       try {
-        const ids: string[] = JSON.parse(raw);
-        setCellIds(ids);
-        cellSetRef.current = new Set(ids);
-      } catch { /* ignore */ }
+        const saved: CellRecord[] = JSON.parse(raw);
+        setCells(saved);
+        cellSetRef.current = new Set(saved.map((c) => c.id));
+      } catch { /* ignore corrupt data */ }
     });
   }, []);
 
   useEffect(() => {
-    if (cellIds.length > 0) {
-      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(cellIds)).catch(() => {});
+    if (cells.length > 0) {
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(cells)).catch(() => {});
     }
-  }, [cellIds]);
+  }, [cells]);
 
-  // ── GPS → H3 cell revelation ───────────────────────────────────────────────
+  // ── GPS → grid cell revelation ─────────────────────────────────────────────
 
   const addPoint = useCallback((lat: number, lng: number) => {
-    // Track total distance for every GPS update
+    // Distance tracking on every GPS event
     if (lastPosRef.current) {
       const d = haversine(lastPosRef.current.lat, lastPosRef.current.lng, lat, lng);
       if (d > 0) setTotalDistance((prev) => prev + d);
     }
     lastPosRef.current = { lat, lng };
 
-    // H3 dedup: same cell = already revealed, nothing to add
-    const cellId = latLngToCell(lat, lng, H3_RESOLUTION);
-    if (cellSetRef.current.has(cellId)) return;
+    // Snap to grid cell — same location always gives same ID
+    const cell = getCellRecord(lat, lng);
+    if (cellSetRef.current.has(cell.id)) return; // already revealed, nothing to do
 
-    cellSetRef.current.add(cellId);
-
-    setCellIds((prev) => {
+    cellSetRef.current.add(cell.id);
+    setCells((prev) => {
       if (prev.length >= MAX_CELLS) {
-        // Sliding window: remove oldest cell
-        const oldest = prev[0];
-        cellSetRef.current.delete(oldest);
-        return [...prev.slice(1), cellId];
+        // Sliding window: drop oldest cell
+        const removed = prev[0];
+        cellSetRef.current.delete(removed.id);
+        return [...prev.slice(1), cell];
       }
-      return [...prev, cellId];
+      return [...prev, cell];
     });
   }, []);
 
@@ -239,19 +254,17 @@ export default function MapScreen() {
   // ── Fog circles in screen space ────────────────────────────────────────────
 
   const fogCircles = useMemo(() => {
-    if (cellIds.length === 0) return [];
+    if (cells.length === 0) return [];
 
     const { lng: cLng, lat: cLat, zoom, heading } = cameraState;
     const scale = Math.pow(2, zoom) * 256;
     const cx = mercatorX(cLng) * scale;
     const cy = mercatorY(cLat) * scale;
 
-    // Radius in screen pixels
     const metersPerPixel =
       (2 * Math.PI * 6378137 * Math.cos((cLat * Math.PI) / 180)) / scale;
     const r = REVEAL_RADIUS_METERS / metersPerPixel;
 
-    // Bearing rotation matrix
     const bearingRad = (heading * Math.PI) / 180;
     const cosB = Math.cos(bearingRad);
     const sinB = Math.sin(bearingRad);
@@ -259,24 +272,19 @@ export default function MapScreen() {
     const margin = r * 2;
     const result: { x: number; y: number; r: number }[] = [];
 
-    for (const cellId of cellIds) {
-      // Get the canonical center of each H3 cell
-      const [lat, lng] = cellToLatLng(cellId);
-
-      const px = mercatorX(lng) * scale;
-      const py = mercatorY(lat) * scale;
+    for (const cell of cells) {
+      const px = mercatorX(cell.lng) * scale;
+      const py = mercatorY(cell.lat) * scale;
 
       const dx = px - cx;
       const dy = py - cy;
 
-      // Apply map bearing rotation
       const rx = dx * cosB + dy * sinB;
       const ry = -dx * sinB + dy * cosB;
 
       const sx = screenW / 2 + rx;
       const sy = screenH / 2 + ry;
 
-      // Viewport culling
       if (sx + r < -margin || sx - r > screenW + margin) continue;
       if (sy + r < -margin || sy - r > screenH + margin) continue;
 
@@ -284,7 +292,7 @@ export default function MapScreen() {
     }
 
     return result;
-  }, [cellIds, cameraState, screenW, screenH]);
+  }, [cells, cameraState, screenW, screenH]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -298,7 +306,7 @@ export default function MapScreen() {
           text: "Apagar",
           style: "destructive",
           onPress: async () => {
-            setCellIds([]);
+            setCells([]);
             cellSetRef.current = new Set();
             setTotalDistance(0);
             lastPosRef.current = null;
@@ -406,14 +414,15 @@ export default function MapScreen() {
         )}
       </Map>
 
-      {/* ── SVG fog overlay with radial gradient edges ── */}
+      {/* SVG fog mask with soft radial gradient edges */}
       <View style={StyleSheet.absoluteFill} pointerEvents="none">
         <Svg width={screenW} height={screenH}>
           <Defs>
             {/*
-              One shared radial gradient, scaled to each circle via objectBoundingBox.
-              Center = fully revealed (black in mask = transparent fog).
-              Edge = soft fade back to fog.
+              Single shared radial gradient — objectBoundingBox makes it
+              scale automatically to each circle's own bounding box.
+              Center (black, opaque) = revealed.
+              Edge (black, transparent) = fog fades back in smoothly.
             */}
             <RadialGradient
               id="reveal-grad"
@@ -431,7 +440,6 @@ export default function MapScreen() {
             </RadialGradient>
 
             <Mask id="fog-mask">
-              {/* White = fog shows. Black (via gradient) = fog removed. */}
               <Rect x="0" y="0" width={screenW} height={screenH} fill="white" />
               {fogCircles.map((c, i) => (
                 <Circle
@@ -456,7 +464,7 @@ export default function MapScreen() {
         </Svg>
       </View>
 
-      {/* ── HUD ── */}
+      {/* HUD */}
       <View style={[styles.topHud, { top: topOffset }]}>
         <View style={styles.hudCard}>
           <Feather name="navigation" size={13} color={colors.light.primary} />
@@ -466,23 +474,26 @@ export default function MapScreen() {
         <View style={styles.hudCard}>
           <Feather name="eye" size={13} color={colors.light.primary} />
           <Text style={styles.hudLabel}>Revelado</Text>
-          <Text style={styles.hudValue}>{formatArea(cellIds.length)}</Text>
+          <Text style={styles.hudValue}>{formatArea(cells.length)}</Text>
         </View>
         <View style={styles.hudCard}>
           <Feather name="map-pin" size={13} color={colors.light.primary} />
           <Text style={styles.hudLabel}>Pontos</Text>
-          <Text style={styles.hudValue}>{cellIds.length}</Text>
+          <Text style={styles.hudValue}>{cells.length}</Text>
         </View>
       </View>
 
-      {/* ── Controls ── */}
+      {/* Controls */}
       <View style={[styles.rightCol, { bottom: bottomOffset }]}>
         <TouchableOpacity style={styles.fab} onPress={handleCenter}>
           <Feather name="crosshair" size={22} color={colors.light.primary} />
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.fab, !isTracking && styles.fabInactive]}
-          onPress={() => { setIsTracking((t) => !t); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); }}
+          onPress={() => {
+            setIsTracking((t) => !t);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }}
         >
           <Feather
             name={isTracking ? "pause" : "play"}
@@ -495,7 +506,7 @@ export default function MapScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* ── Status badge ── */}
+      {/* Status badge */}
       <View style={[styles.statusBadge, { bottom: bottomOffset }]}>
         <View style={[styles.statusDot, { backgroundColor: isTracking ? "#22c55e" : colors.light.mutedForeground }]} />
         <Text style={styles.statusText}>{isTracking ? "Rastreando" : "Pausado"}</Text>
@@ -509,38 +520,111 @@ export default function MapScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.light.background },
   map: { flex: 1 },
-  center: { flex: 1, backgroundColor: colors.light.background, alignItems: "center", justifyContent: "center" },
+  center: {
+    flex: 1,
+    backgroundColor: colors.light.background,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   iconCircle: {
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: colors.light.card, alignItems: "center", justifyContent: "center",
-    marginBottom: 20, borderWidth: 1, borderColor: colors.light.border,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: colors.light.card,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: colors.light.border,
   },
-  permTitle: { fontSize: 22, fontWeight: "700" as const, color: colors.light.foreground, marginBottom: 10, textAlign: "center" },
-  permText: { fontSize: 15, color: colors.light.mutedForeground, textAlign: "center", lineHeight: 22, marginBottom: 28 },
-  btn: { backgroundColor: colors.light.primary, borderRadius: colors.radius, paddingVertical: 14, paddingHorizontal: 32 },
-  btnText: { color: colors.light.primaryForeground, fontWeight: "600" as const, fontSize: 16 },
-  topHud: { position: "absolute", left: 12, right: 12, flexDirection: "row", gap: 8 },
+  permTitle: {
+    fontSize: 22,
+    fontWeight: "700" as const,
+    color: colors.light.foreground,
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  permText: {
+    fontSize: 15,
+    color: colors.light.mutedForeground,
+    textAlign: "center",
+    lineHeight: 22,
+    marginBottom: 28,
+  },
+  btn: {
+    backgroundColor: colors.light.primary,
+    borderRadius: colors.radius,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+  },
+  btnText: {
+    color: colors.light.primaryForeground,
+    fontWeight: "600" as const,
+    fontSize: 16,
+  },
+  topHud: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    gap: 8,
+  },
   hudCard: {
-    flex: 1, alignItems: "center",
-    backgroundColor: "rgba(13, 17, 27, 0.88)", borderRadius: 10,
-    paddingVertical: 8, paddingHorizontal: 4,
-    borderWidth: 1, borderColor: colors.light.border, gap: 3,
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: "rgba(13, 17, 27, 0.88)",
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    gap: 3,
   },
-  hudLabel: { fontSize: 10, color: colors.light.mutedForeground, letterSpacing: 0.4, textTransform: "uppercase" as const },
-  hudValue: { fontSize: 13, fontWeight: "700" as const, color: colors.light.primary },
-  rightCol: { position: "absolute", right: 14, gap: 10, alignItems: "center" },
+  hudLabel: {
+    fontSize: 10,
+    color: colors.light.mutedForeground,
+    letterSpacing: 0.4,
+    textTransform: "uppercase" as const,
+  },
+  hudValue: {
+    fontSize: 13,
+    fontWeight: "700" as const,
+    color: colors.light.primary,
+  },
+  rightCol: {
+    position: "absolute",
+    right: 14,
+    gap: 10,
+    alignItems: "center",
+  },
   fab: {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: "rgba(13, 17, 27, 0.90)", alignItems: "center", justifyContent: "center",
-    borderWidth: 1, borderColor: colors.light.border,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(13, 17, 27, 0.90)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.light.border,
   },
   fabInactive: { borderColor: colors.light.muted },
   statusBadge: {
-    position: "absolute", left: 14, flexDirection: "row" as const, alignItems: "center",
-    backgroundColor: "rgba(13, 17, 27, 0.88)", borderRadius: 20,
-    paddingVertical: 8, paddingHorizontal: 14,
-    borderWidth: 1, borderColor: colors.light.border, gap: 6,
+    position: "absolute",
+    left: 14,
+    flexDirection: "row" as const,
+    alignItems: "center",
+    backgroundColor: "rgba(13, 17, 27, 0.88)",
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    gap: 6,
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
-  statusText: { fontSize: 13, color: colors.light.foreground, fontWeight: "500" as const },
+  statusText: {
+    fontSize: 13,
+    color: colors.light.foreground,
+    fontWeight: "500" as const,
+  },
 });

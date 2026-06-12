@@ -58,7 +58,6 @@
     "zod-validation-error": "^3.4.0"
   },
   "dependencies": {
-    "@maplibre/maplibre-react-native": "^11.3.4",
-    "h3-js": "^4.4.0"
+    "@maplibre/maplibre-react-native": "^11.3.4"
   }
 }
